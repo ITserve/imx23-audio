@@ -28,14 +28,13 @@
 
 /* TODO Use codec IO function soc snd write etc, instead of __writel __readl */
 
-// TODO use container_of
 struct mxs_irq_data {
-	struct snd_pcm_substream *substream;
-	struct mxs_adc_priv *mxs_adc;
+	int playback;
 };
 
 struct mxs_adc_priv {
-	struct mxs_irq_data irq_data;
+	struct mxs_irq_data adc_err_irq_data;
+	struct mxs_irq_data dac_err_irq_data;
 	int dma_adc_err_irq;
 	int dma_dac_err_irq;
 	int hp_short_irq;
@@ -231,18 +230,20 @@ static irqreturn_t mxs_short_irq(int irq, void *dev_id)
 
 static irqreturn_t mxs_err_irq(int irq, void *dev_id)
 {
-	struct mxs_adc_priv *mxs_adc = dev_id;
-	struct snd_pcm_substream *substream = mxs_adc->irq_data.substream;
-	int playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ? 1 : 0;
+	struct mxs_irq_data *irq_data = dev_id;
+	struct mxs_adc_priv *mxs_adc;
+	int playback = irq_data->playback;
 	u32 ctrl_reg;
 	u32 overflow_mask;
 	u32 underflow_mask;
 
 	if (playback) {
+		mxs_adc = container_of(irq_data, struct mxs_adc_priv, dac_err_irq_data);
 		ctrl_reg = __raw_readl(mxs_adc->audioout_base + HW_AUDIOOUT_CTRL);
 		underflow_mask = BM_AUDIOOUT_CTRL_FIFO_UNDERFLOW_IRQ;
 		overflow_mask = BM_AUDIOOUT_CTRL_FIFO_OVERFLOW_IRQ;
 	} else {
+		mxs_adc = container_of(irq_data, struct mxs_adc_priv, adc_err_irq_data);
 		ctrl_reg = __raw_readl(mxs_adc->audioin_base + HW_AUDIOIN_CTRL);
 		underflow_mask = BM_AUDIOIN_CTRL_FIFO_UNDERFLOW_IRQ;
 		overflow_mask = BM_AUDIOIN_CTRL_FIFO_OVERFLOW_IRQ;
@@ -376,8 +377,6 @@ static int mxs_startup(struct snd_pcm_substream *substream,
 {
 	struct mxs_adc_priv *mxs_adc = snd_soc_dai_get_drvdata(cpu_dai);
 	int playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ? 1 : 0;
-	mxs_adc->irq_data.mxs_adc = mxs_adc;
-	mxs_adc->irq_data.substream = substream;
 
 	work.mxs_adc = mxs_adc;
 	adc_ramp_work.mxs_adc = mxs_adc;
@@ -486,7 +485,11 @@ static int mxs_adc_probe(struct platform_device *pdev)
 	mxs_adc->rtc_base = devm_ioremap(&pdev->dev, 0x8005c000, 0x2000);
 	if (IS_ERR(mxs_adc->rtc_base))
 		return PTR_ERR(mxs_adc->rtc_base);
-	
+
+	mxs_adc->adc_err_irq_data.playback = 0;
+	mxs_adc->dac_err_irq_data.playback = 1;
+
+
 	/* Get IRQ numbers */
 	mxs_adc->dma_adc_err_irq = platform_get_irq(pdev, 0);
 	if (mxs_adc->dma_adc_err_irq < 0) {
@@ -508,18 +511,18 @@ static int mxs_adc_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "failed to get HP_SHORT irq resource: %d\n", ret);
 		return ret;
 	}
-	
+
 	/* Request IRQs */
-	ret = devm_request_irq(&pdev->dev, mxs_adc->dma_adc_err_irq, mxs_err_irq, 0, "MXS DAC and ADC Error",
-			  mxs_adc);
+	ret = devm_request_irq(&pdev->dev, mxs_adc->dma_adc_err_irq, mxs_err_irq, 0, "MXS ADC Error",
+			&mxs_adc->adc_err_irq_data);
 	if (ret) {
 		printk(KERN_ERR "%s: Unable to request ADC/DAC error irq %d\n",
 		       __func__, mxs_adc->dma_adc_err_irq);
 		return ret;
 	}
 
-	ret = devm_request_irq(&pdev->dev, mxs_adc->dma_dac_err_irq, mxs_err_irq, 0, "MXS DAC and ADC Error",
-			  mxs_adc);
+	ret = devm_request_irq(&pdev->dev, mxs_adc->dma_dac_err_irq, mxs_err_irq, 0, "MXS DAC Error",
+			&mxs_adc->dac_err_irq_data);
 	if (ret) {
 		printk(KERN_ERR "%s: Unable to request ADC/DAC error irq %d\n",
 		       __func__, mxs_adc->dma_dac_err_irq);
